@@ -48,9 +48,14 @@ systemctl --user enable --now mynah
 #   busctl --user call org.kde.kglobalaccel /kglobalaccel org.kde.KGlobalAccel \
 #     doRegister as 4 "mynah-toggle.desktop" "_launch" "Mynah Toggle" "Launch"
 #   busctl --user call org.kde.kglobalaccel /kglobalaccel org.kde.KGlobalAccel \
-#     setShortcut asaiu 4 "mynah-toggle.desktop" "_launch" "Mynah Toggle" "Launch" 1 268435528 4
-# (requires a mynah-toggle.desktop launcher in ~/.local/share/applications;
-#  editing kglobalshortcutsrc alone does NOT register a new shortcut)
+#     setShortcut asaiu 4 "mynah-toggle.desktop" "_launch" "Mynah Toggle" "Launch" 1 268435528 6
+# Notes for Plasma 6 (learned the hard way):
+# - kglobalacceld may run inside kwin_wayland; editing kglobalshortcutsrc and
+#   restarting plasma-kglobalaccel.service does nothing until next login.
+# - flags must include SetPresent (2) or the key is registered but never
+#   grabbed: 6 = SetPresent | NoAutoloading.
+# - the mynah-toggle.desktop launcher must exist in
+#   ~/.local/share/applications (and/or ~/.local/share/kglobalaccel).
 ```
 
 ## Usage
