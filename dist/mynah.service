@@ -1,0 +1,13 @@
+[Unit]
+Description=mynah voice-to-text daemon
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/mynah daemon
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=graphical-session.target
