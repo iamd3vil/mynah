@@ -1,5 +1,6 @@
 mod asr;
 mod audio;
+mod icon;
 mod overlay;
 mod sock;
 mod tray;

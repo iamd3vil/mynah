@@ -21,14 +21,9 @@ impl ksni::Tray for MynahTray {
         format!("mynah — {}", phase_label(self.phase))
     }
 
-    fn icon_name(&self) -> String {
-        match self.phase {
-            Phase::Loading => "audio-input-microphone-low",
-            Phase::Idle => "audio-input-microphone",
-            Phase::Recording => "media-record",
-            Phase::Transcribing => "view-refresh",
-        }
-        .into()
+    // No icon_name: with it empty, hosts fall back to our pixmaps.
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        crate::icon::pixmaps(self.phase)
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
