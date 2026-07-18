@@ -43,6 +43,14 @@ systemctl --user enable --now mynah
 # System Settings → Keyboard → Shortcuts → Add New → Command or Script:
 #   command: ~/.local/bin/mynah toggle
 # and assign e.g. Meta+H.
+#
+# Or headless, via kglobalaccel's D-Bus API (Meta+H = 0x10000048):
+#   busctl --user call org.kde.kglobalaccel /kglobalaccel org.kde.KGlobalAccel \
+#     doRegister as 4 "mynah-toggle.desktop" "_launch" "Mynah Toggle" "Launch"
+#   busctl --user call org.kde.kglobalaccel /kglobalaccel org.kde.KGlobalAccel \
+#     setShortcut asaiu 4 "mynah-toggle.desktop" "_launch" "Mynah Toggle" "Launch" 1 268435528 4
+# (requires a mynah-toggle.desktop launcher in ~/.local/share/applications;
+#  editing kglobalshortcutsrc alone does NOT register a new shortcut)
 ```
 
 ## Usage
