@@ -73,6 +73,26 @@ Left-clicking the tray icon also toggles.
 
 Environment variables (set in the systemd unit if needed):
 
-- `MYNAH_MODEL_DIR` — model directory (default
+- `MYNAH_ENGINE` — `parakeet` (default, near-instant) or `whisper`
+  (large-v3-turbo; much better on accented English). Whisper needs its model
+  downloaded first: `scripts/download-model.sh whisper`.
+  CAUTION: CPU-only whisper costs ~20s per utterance regardless of length
+  (fixed 30s encoder window) — build with Vulkan for dictation use.
+- `MYNAH_WHISPER_THREADS` — CPU threads for whisper (default: physical cores)
+- `MYNAH_WHISPER_BEAM` — beam size for whisper (default greedy; barely
+  matters for turbo's 4-layer decoder)
+- `MYNAH_MODEL_DIR` — parakeet model directory (default
   `~/.local/share/mynah/models/parakeet-tdt-0.6b-v3-int8`)
+- `MYNAH_WHISPER_MODEL` — whisper gguf path (default
+  `~/.local/share/mynah/models/ggml-large-v3-turbo-q5_0.bin`)
+- `MYNAH_LANG` — transcription language hint (default `en`; whisper only)
 - `RUST_LOG` — log level (default `info`); `journalctl --user -u mynah` to read.
+
+To switch engines: `systemctl --user edit mynah`, add
+`[Service]` / `Environment=MYNAH_ENGINE=whisper`, then
+`systemctl --user restart mynah`.
+
+Whisper runs CPU-only unless whisper.cpp is built with Vulkan: install
+`vulkan-headers`, then `cargo build --release --features whisper-vulkan`
+(the whisper encoder is the bottleneck; the iGPU takes it from ~20s to a few
+seconds per utterance).
