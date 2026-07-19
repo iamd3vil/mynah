@@ -1,19 +1,18 @@
 //! Transcription worker. Owns the speech model on a dedicated thread so
 //! inference never blocks the main state machine.
 //!
-//! Two engines are supported, chosen with MYNAH_ENGINE:
-//! - "parakeet" (default): Parakeet TDT 0.6B v3, near-instant on CPU.
-//! - "whisper": whisper.cpp (e.g. large-v3-turbo), slower but markedly more
-//!   robust on accented English.
+//! Inference runs on transcribe.cpp (unified ggml engine) — one API for every
+//! model family, GPU offload via the `vulkan` feature. MYNAH_ENGINE picks the
+//! default model:
+//! - "parakeet" (default): Parakeet TDT 0.6B v3, fast.
+//! - "whisper": Whisper large-v3-turbo, better on accented English.
+//! MYNAH_MODEL overrides the model path entirely (any supported gguf).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 
 use anyhow::{Context, Result};
-use transcribe_rs::onnx::parakeet::ParakeetModel;
-use transcribe_rs::onnx::Quantization;
-use transcribe_rs::{SpeechModel, TranscribeOptions};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
+use transcribe_cpp::{Model, RunOptions, Session};
 
 use crate::Event;
 
@@ -26,146 +25,54 @@ fn data_dir() -> PathBuf {
     data.join("mynah/models")
 }
 
-pub fn parakeet_dir() -> PathBuf {
-    std::env::var("MYNAH_MODEL_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| data_dir().join("parakeet-tdt-0.6b-v3-int8"))
-}
-
-pub fn whisper_path() -> PathBuf {
-    std::env::var("MYNAH_WHISPER_MODEL")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| data_dir().join("ggml-large-v3-turbo-q5_0.bin"))
-}
-
-/// whisper.cpp scales to physical cores; hyperthreads only add spin overhead.
-/// Overridable with MYNAH_WHISPER_THREADS.
-fn whisper_threads() -> i32 {
-    if let Ok(n) = std::env::var("MYNAH_WHISPER_THREADS") {
-        if let Ok(n) = n.parse() {
-            return n;
-        }
+fn model_path() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("MYNAH_MODEL") {
+        return Ok(PathBuf::from(path));
     }
-    let logical = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
-    (logical / 2).max(4) as i32
+    let engine = std::env::var("MYNAH_ENGINE").unwrap_or_else(|_| "parakeet".into());
+    match engine.as_str() {
+        "parakeet" => Ok(data_dir().join("parakeet-tdt-0.6b-v3-Q8_0.gguf")),
+        // whisper.cpp .bin files load directly (backward compatible).
+        "whisper" => Ok(data_dir().join("ggml-large-v3-turbo-q5_0.bin")),
+        other => anyhow::bail!("unknown MYNAH_ENGINE {other:?} (use parakeet or whisper)"),
+    }
 }
 
 fn language() -> String {
-    // Pinned language (default "en") — auto-detect adds latency and can
-    // misfire on short dictation clips. Parakeet ignores this.
     std::env::var("MYNAH_LANG").unwrap_or_else(|_| "en".into())
 }
 
-/// Engine wrapper. Whisper is driven through whisper-rs directly so we
-/// control thread count and sampling — transcribe-rs hardcodes beam search
-/// (beam_size 3), which is ~3x slower than greedy for a small accuracy gain.
-enum Engine {
-    Parakeet(ParakeetModel),
-    Whisper(Whisper),
+struct Asr {
+    session: Session,
 }
 
-impl Engine {
-    fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
-        match self {
-            Engine::Parakeet(m) => {
-                let opts = TranscribeOptions {
-                    language: Some(language()),
-                    ..Default::default()
-                };
-                Ok(m.transcribe(samples, &opts)?.text)
-            }
-            Engine::Whisper(m) => m.transcribe(samples),
-        }
-    }
-}
-
-struct Whisper {
-    state: WhisperState,
-    // Owns the C memory backing `state`; must outlive it.
-    _context: WhisperContext,
-}
-
-impl Whisper {
-    fn load(path: &std::path::Path) -> Result<Self> {
-        let mut ctx_params = WhisperContextParameters::default();
-        ctx_params.use_gpu = true; // no-op unless built with a GPU backend
-        ctx_params.flash_attn = true;
-        let context = WhisperContext::new_with_params(
-            path.to_str().context("non-utf8 model path")?,
-            ctx_params,
-        )
-        .map_err(|e| anyhow::anyhow!("loading whisper model: {e}"))?;
-        let state = context
-            .create_state()
-            .map_err(|e| anyhow::anyhow!("creating whisper state: {e}"))?;
-        Ok(Self { state, _context: context })
+impl Asr {
+    fn load() -> Result<Self> {
+        let path = model_path()?;
+        log::info!("loading model {}", path.display());
+        anyhow::ensure!(
+            path.exists(),
+            "model missing at {} (run scripts/download-model.sh)",
+            path.display()
+        );
+        let model = Model::load(&path)
+            .with_context(|| format!("loading model {}", path.display()))?;
+        let session = model.session().context("opening session")?;
+        Ok(Self { session })
     }
 
     fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
-        // MYNAH_WHISPER_BEAM=N opts into beam search for max accuracy at ~Nx
-        // the decode cost; greedy is the right default for dictation latency.
-        let beam: usize = std::env::var("MYNAH_WHISPER_BEAM")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let strategy = if beam > 1 {
-            SamplingStrategy::BeamSearch { beam_size: beam as i32, patience: -1.0 }
-        } else {
-            SamplingStrategy::Greedy { best_of: 1 }
+        let options = RunOptions {
+            // Pinned language (default "en") — auto-detect adds latency and
+            // can misfire on short dictation clips.
+            language: Some(language()),
+            ..Default::default()
         };
-
-        let lang = language();
-        let mut params = FullParams::new(strategy);
-        params.set_language(Some(&lang));
-        params.set_n_threads(whisper_threads());
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_suppress_blank(true);
-
-        self.state
-            .full(params, samples)
-            .map_err(|e| anyhow::anyhow!("whisper inference: {e}"))?;
-
-        let mut text = String::new();
-        for i in 0..self.state.full_n_segments() {
-            let segment = self
-                .state
-                .get_segment(i)
-                .context("whisper segment out of bounds")?;
-            text.push_str(segment.to_str().map_err(|e| anyhow::anyhow!("segment text: {e}"))?);
-        }
-        Ok(text.trim().to_string())
-    }
-}
-
-fn load() -> Result<Engine> {
-    let engine = std::env::var("MYNAH_ENGINE").unwrap_or_else(|_| "parakeet".into());
-    match engine.as_str() {
-        "parakeet" => {
-            let dir = parakeet_dir();
-            log::info!("loading parakeet from {}", dir.display());
-            anyhow::ensure!(
-                dir.join("vocab.txt").exists(),
-                "parakeet model missing at {} (run scripts/download-model.sh parakeet)",
-                dir.display()
-            );
-            let model = ParakeetModel::load(&dir, &Quantization::Int8)
-                .context("loading parakeet model")?;
-            Ok(Engine::Parakeet(model))
-        }
-        "whisper" => {
-            let path = whisper_path();
-            log::info!("loading whisper from {}", path.display());
-            anyhow::ensure!(
-                path.exists(),
-                "whisper model missing at {} (run scripts/download-model.sh whisper)",
-                path.display()
-            );
-            Ok(Engine::Whisper(Whisper::load(&path)?))
-        }
-        other => anyhow::bail!("unknown MYNAH_ENGINE {other:?} (use parakeet or whisper)"),
+        let transcript = self
+            .session
+            .run(samples, &options)
+            .map_err(|e| anyhow::anyhow!("inference: {e}"))?;
+        Ok(transcript.text.trim().to_string())
     }
 }
 
@@ -180,7 +87,7 @@ impl Worker {
         std::thread::Builder::new()
             .name("asr".into())
             .spawn(move || {
-                let mut model = match load() {
+                let mut model = match Asr::load() {
                     Ok(m) => {
                         events.send(Event::ModelReady).ok();
                         m
@@ -217,16 +124,48 @@ impl Worker {
 
 /// One-shot file transcription for `mynah transcribe` (testing/debugging).
 pub fn transcribe_file(path: &std::path::Path) -> Result<String> {
-    let samples = transcribe_rs::audio::read_wav_samples(path)?;
+    let samples = read_wav_16k_mono(path)?;
     let t0 = std::time::Instant::now();
-    let mut engine = load()?;
+    let mut asr = Asr::load()?;
     let loaded = t0.elapsed();
     let t1 = std::time::Instant::now();
-    let text = engine.transcribe(&samples)?;
+    let text = asr.transcribe(&samples)?;
     eprintln!(
         "load: {loaded:.1?}, inference: {:.1?} for {:.1}s audio",
         t1.elapsed(),
         samples.len() as f32 / 16000.0
     );
     Ok(text)
+}
+
+/// Minimal RIFF/WAVE reader: 16 kHz mono 16-bit PCM only (test tooling).
+fn read_wav_16k_mono(path: &std::path::Path) -> Result<Vec<f32>> {
+    let bytes = std::fs::read(path)?;
+    anyhow::ensure!(bytes.len() > 44 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE", "not a wav file");
+    let mut pos = 12;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let len = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = &bytes[pos + 8..(pos + 8 + len).min(bytes.len())];
+        match id {
+            b"fmt " => {
+                let channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
+                let rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+                let bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+                anyhow::ensure!(
+                    (channels, rate, bits) == (1, 16000, 16),
+                    "expected 16kHz mono s16 wav, got {channels}ch {rate}Hz {bits}bit"
+                );
+            }
+            b"data" => {
+                return Ok(body
+                    .chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+                    .collect());
+            }
+            _ => {}
+        }
+        pos += 8 + len + (len & 1);
+    }
+    anyhow::bail!("no data chunk in wav")
 }

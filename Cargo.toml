@@ -14,9 +14,6 @@ ksni = { version = "0.3.6", default-features = false, features = ["async-io", "b
 log = "0.4.33"
 smithay-client-toolkit = "0.20.0"
 tiny-skia = "0.12.0"
-transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx", "whisper-cpp"] }
+transcribe-cpp = { version = "0.1.3", features = ["vulkan"] }
 wayland-client = "0.31.14"
-whisper-rs = "0.16"
 
-[features]
-whisper-vulkan = ["whisper-rs/vulkan"]

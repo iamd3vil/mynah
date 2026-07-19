@@ -78,7 +78,7 @@ impl Drop for Overlay {
 
 fn run(level: Level, running: Arc<AtomicBool>, transcribing: Arc<AtomicBool>) -> Result<()> {
     let conn = Connection::connect_to_env().context("connecting to wayland")?;
-    let (globals, mut queue) = registry_queue_init(&conn).context("wayland globals")?;
+    let (globals, queue) = registry_queue_init(&conn).context("wayland globals")?;
     let qh = queue.handle();
 
     let compositor = CompositorState::bind(&globals, &qh).context("wl_compositor")?;
