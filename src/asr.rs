@@ -57,11 +57,11 @@ fn language() -> String {
     lang
 }
 
-/// Run options for streaming: pinned locale + punctuation/capitalization on.
+/// Run options for streaming: pinned locale. (Nemotron ignores runtime PNC
+/// control — punctuation is whatever the model produces.)
 fn stream_run_options() -> RunOptions {
     RunOptions {
         language: Some(language()),
-        pnc: transcribe_cpp::Pnc::On,
         ..Default::default()
     }
 }
