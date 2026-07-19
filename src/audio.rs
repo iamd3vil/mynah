@@ -12,6 +12,12 @@ use crate::Level;
 
 pub const TARGET_RATE: u32 = 16_000;
 
+/// ~160ms at 16 kHz — the granularity live chunks are handed to the ASR.
+const CHUNK: usize = 2560;
+
+/// Receives resampled 16 kHz mono chunks during live streaming.
+pub type ChunkSink = Box<dyn Fn(Vec<f32>) + Send>;
+
 pub struct Capture {
     // Held so the stream keeps running; dropped on stop.
     _stream: cpal::Stream,
@@ -20,7 +26,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start(level: Level) -> Result<Self> {
+    pub fn start(level: Level, chunk_sink: Option<ChunkSink>) -> Result<Self> {
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -32,6 +38,9 @@ impl Capture {
         let buf = Arc::new(Mutex::new(Vec::<f32>::with_capacity(rate as usize * 30)));
 
         let buf2 = buf.clone();
+        // Pending samples not yet handed to the chunk sink (device rate).
+        let chunk_at_device_rate = (CHUNK as u64 * rate as u64 / TARGET_RATE as u64) as usize;
+        let mut pending: Vec<f32> = Vec::with_capacity(chunk_at_device_rate * 2);
         let stream = device
             .build_input_stream(
                 config,
@@ -42,9 +51,25 @@ impl Capture {
                         let mono = frame.iter().sum::<f32>() / channels as f32;
                         sum_sq += mono * mono;
                         buf.push(mono);
+                        if chunk_sink.is_some() {
+                            pending.push(mono);
+                        }
                     }
+                    drop(buf);
                     let rms = (sum_sq / (data.len() / channels).max(1) as f32).sqrt();
                     level.store(rms.to_bits(), Ordering::Relaxed);
+
+                    if let Some(sink) = &chunk_sink {
+                        while pending.len() >= chunk_at_device_rate {
+                            let chunk: Vec<f32> = pending.drain(..chunk_at_device_rate).collect();
+                            let chunk = if rate == TARGET_RATE {
+                                chunk
+                            } else {
+                                resample(&chunk, rate, TARGET_RATE)
+                            };
+                            sink(chunk);
+                        }
+                    }
                 },
                 |e| log::error!("audio stream error: {e}"),
                 None,

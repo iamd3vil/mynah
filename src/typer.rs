@@ -37,6 +37,11 @@ impl Typer {
     pub fn type_text(&mut self, text: &str) -> Result<()> {
         // Let the compositor settle focus after the overlay closes.
         sleep(Duration::from_millis(60));
+        self.type_delta(text)
+    }
+
+    /// Type without the settle delay — for live streaming deltas.
+    pub fn type_delta(&mut self, text: &str) -> Result<()> {
         for ch in text.chars().flat_map(normalize) {
             let Some((code, shift)) = keymap(ch) else {
                 log::warn!("no keycode for {ch:?}, skipping");

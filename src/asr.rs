@@ -12,9 +12,14 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 
 use anyhow::{Context, Result};
-use transcribe_cpp::{Model, RunOptions, Session};
+use transcribe_cpp::{Model, RunOptions, Session, StreamOptions};
 
 use crate::Event;
+
+/// Live streaming mode: type committed text while speaking (MYNAH_STREAM=1).
+pub fn streaming_enabled() -> bool {
+    std::env::var("MYNAH_STREAM").is_ok_and(|v| v == "1")
+}
 
 fn data_dir() -> PathBuf {
     let data = std::env::var("XDG_DATA_HOME")
@@ -29,6 +34,11 @@ fn model_path() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("MYNAH_MODEL") {
         return Ok(PathBuf::from(path));
     }
+    if streaming_enabled() {
+        // Streaming needs a streaming-capable model; whisper/parakeet-tdt
+        // are batch-only in transcribe.cpp.
+        return Ok(data_dir().join("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"));
+    }
     let engine = std::env::var("MYNAH_ENGINE").unwrap_or_else(|_| "parakeet".into());
     match engine.as_str() {
         "parakeet" => Ok(data_dir().join("parakeet-tdt-0.6b-v3-Q8_0.gguf")),
@@ -39,7 +49,21 @@ fn model_path() -> Result<PathBuf> {
 }
 
 fn language() -> String {
-    std::env::var("MYNAH_LANG").unwrap_or_else(|_| "en".into())
+    let lang = std::env::var("MYNAH_LANG").unwrap_or_else(|_| "en".into());
+    // Locale-based models (nemotron) reject bare "en"; default to en-US.
+    if streaming_enabled() && !lang.contains('-') && lang == "en" {
+        return "en-US".into();
+    }
+    lang
+}
+
+/// Run options for streaming: pinned locale + punctuation/capitalization on.
+fn stream_run_options() -> RunOptions {
+    RunOptions {
+        language: Some(language()),
+        pnc: transcribe_cpp::Pnc::On,
+        ..Default::default()
+    }
 }
 
 struct Asr {
@@ -57,6 +81,15 @@ impl Asr {
         );
         let model = Model::load(&path)
             .with_context(|| format!("loading model {}", path.display()))?;
+        if streaming_enabled() {
+            anyhow::ensure!(
+                model.capabilities().supports_streaming,
+                "{} ({}) does not support streaming — MYNAH_STREAM needs a \
+                 streaming-capable model (e.g. nemotron-3.5-asr-streaming)",
+                path.display(),
+                model.arch()
+            );
+        }
         let session = model.session().context("opening session")?;
         Ok(Self { session })
     }
@@ -76,13 +109,21 @@ impl Asr {
     }
 }
 
+enum Job {
+    Batch(Vec<f32>),
+    StreamStart,
+    StreamChunk(Vec<f32>),
+    StreamEnd,
+    StreamAbort,
+}
+
 pub struct Worker {
-    jobs: Sender<Vec<f32>>,
+    jobs: Sender<Job>,
 }
 
 impl Worker {
     pub fn spawn(events: Sender<Event>) -> Self {
-        let (jobs, job_rx) = mpsc::channel::<Vec<f32>>();
+        let (jobs, job_rx) = mpsc::channel::<Job>();
 
         std::thread::Builder::new()
             .name("asr".into())
@@ -99,17 +140,30 @@ impl Worker {
                     }
                 };
 
-                while let Ok(samples) = job_rx.recv() {
-                    let started = std::time::Instant::now();
-                    let result = model.transcribe(&samples);
-                    if let Ok(text) = &result {
-                        log::info!(
-                            "transcribed {:.1}s audio in {:?}: {text:?}",
-                            samples.len() as f32 / 16000.0,
-                            started.elapsed()
-                        );
+                while let Ok(job) = job_rx.recv() {
+                    match job {
+                        Job::Batch(samples) => {
+                            let started = std::time::Instant::now();
+                            let result = model.transcribe(&samples);
+                            if let Ok(text) = &result {
+                                log::info!(
+                                    "transcribed {:.1}s audio in {:?}: {text:?}",
+                                    samples.len() as f32 / 16000.0,
+                                    started.elapsed()
+                                );
+                            }
+                            events.send(Event::Transcribed(result)).ok();
+                        }
+                        Job::StreamStart => {
+                            if let Err(e) = run_stream(&mut model.session, &job_rx, &events) {
+                                log::error!("stream failed: {e:#}");
+                                crate::notify(&format!("Streaming failed: {e}"));
+                                events.send(Event::StreamDone).ok();
+                            }
+                        }
+                        // Stale chunk/end from a previous session; ignore.
+                        _ => {}
                     }
-                    events.send(Event::Transcribed(result)).ok();
                 }
             })
             .expect("spawning asr thread");
@@ -118,8 +172,96 @@ impl Worker {
     }
 
     pub fn transcribe(&self, samples: Vec<f32>) {
-        self.jobs.send(samples).expect("asr thread died");
+        self.jobs.send(Job::Batch(samples)).expect("asr thread died");
     }
+
+    pub fn stream_start(&self) {
+        self.jobs.send(Job::StreamStart).expect("asr thread died");
+    }
+
+    pub fn stream_end(&self) {
+        self.jobs.send(Job::StreamEnd).expect("asr thread died");
+    }
+
+    pub fn stream_abort(&self) {
+        self.jobs.send(Job::StreamAbort).expect("asr thread died");
+    }
+
+    /// Sink handed to the audio capture: forwards 16 kHz chunks to the stream.
+    pub fn chunk_sink(&self) -> crate::audio::ChunkSink {
+        let jobs = self.jobs.clone();
+        Box::new(move |chunk| {
+            jobs.send(Job::StreamChunk(chunk)).ok();
+        })
+    }
+}
+
+/// Drive one live-streaming session: feed chunks, emit committed-text deltas.
+/// Committed text is a stable prefix (it only grows), so emitting the suffix
+/// since the last emit can never require correcting already-typed text.
+fn run_stream(
+    session: &mut Session,
+    jobs: &mpsc::Receiver<Job>,
+    events: &Sender<Event>,
+) -> Result<()> {
+    let mut stream = session
+        .stream(&stream_run_options(), &StreamOptions::default())
+        .map_err(|e| anyhow::anyhow!("opening stream: {e}"))?;
+    let started = std::time::Instant::now();
+    let mut emitted = 0usize;
+
+    loop {
+        match jobs.recv() {
+            Ok(Job::StreamChunk(chunk)) => {
+                let update = stream
+                    .feed(&chunk)
+                    .map_err(|e| anyhow::anyhow!("stream feed: {e}"))?;
+                if update.committed_changed {
+                    let committed = stream.text().committed;
+                    if committed.len() > emitted {
+                        events
+                            .send(Event::StreamDelta(committed[emitted..].to_string()))
+                            .ok();
+                        emitted = committed.len();
+                    }
+                }
+            }
+            Ok(Job::StreamEnd) => {
+                stream
+                    .finalize()
+                    .map_err(|e| anyhow::anyhow!("stream finalize: {e}"))?;
+                let committed = stream.text().committed;
+                if committed.len() > emitted {
+                    events
+                        .send(Event::StreamDelta(committed[emitted..].to_string()))
+                        .ok();
+                }
+                log::info!("stream done in {:?}: {committed:?}", started.elapsed());
+                events.send(Event::StreamDone).ok();
+                return Ok(());
+            }
+            Ok(Job::StreamAbort) => {
+                log::info!("stream aborted");
+                events.send(Event::StreamDone).ok();
+                return Ok(());
+            }
+            // Batch job or channel close mid-stream: bail out cleanly.
+            Ok(Job::Batch(_)) | Ok(Job::StreamStart) => {
+                events.send(Event::StreamDone).ok();
+                return Ok(());
+            }
+            Err(_) => anyhow::bail!("job channel closed mid-stream"),
+        }
+    }
+}
+
+/// Print the configured model's capabilities (diagnostics for `mynah caps`).
+pub fn print_caps() -> Result<()> {
+    let path = model_path()?;
+    let model = Model::load(&path)?;
+    println!("model: {} ({})", path.display(), model.arch());
+    println!("{:#?}", model.capabilities());
+    Ok(())
 }
 
 /// One-shot file transcription for `mynah transcribe` (testing/debugging).
@@ -136,6 +278,52 @@ pub fn transcribe_file(path: &std::path::Path) -> Result<String> {
         samples.len() as f32 / 16000.0
     );
     Ok(text)
+}
+
+/// Offline streaming test for `mynah stream-file`: feed a wav in 160ms chunks
+/// as fast as possible, print committed deltas, report per-feed latency.
+pub fn stream_file(path: &std::path::Path) -> Result<()> {
+    let samples = read_wav_16k_mono(path)?;
+    let mut asr = Asr::load()?;
+    let mut stream = asr
+        .session
+        .stream(&stream_run_options(), &StreamOptions::default())
+        .map_err(|e| anyhow::anyhow!("opening stream: {e}"))?;
+
+    let mut feed_times = Vec::new();
+    let mut emitted = 0usize;
+    for chunk in samples.chunks(2560) {
+        let t = std::time::Instant::now();
+        let update = stream.feed(chunk).map_err(|e| anyhow::anyhow!("feed: {e}"))?;
+        feed_times.push(t.elapsed());
+        if update.committed_changed {
+            let committed = stream.text().committed;
+            if committed.len() > emitted {
+                println!("[{:>5.1}s] +{:?}", samples.len() as f32 / 16000.0, &committed[emitted..]);
+                emitted = committed.len();
+            }
+        }
+    }
+    stream.finalize().map_err(|e| anyhow::anyhow!("finalize: {e}"))?;
+    println!("final: {:?}", stream.text().committed);
+
+    let avg = feed_times.iter().sum::<std::time::Duration>() / feed_times.len().max(1) as u32;
+    let max = feed_times.iter().max().copied().unwrap_or_default();
+    // Judge steady-state: skip the first feed (backend warmup) and require
+    // p95 within the chunk budget; a rare spike only queues one chunk.
+    let mut sorted: Vec<_> = feed_times.iter().skip(1).collect();
+    sorted.sort();
+    let p95 = sorted
+        .get(sorted.len().saturating_sub(1) * 95 / 100)
+        .copied()
+        .copied()
+        .unwrap_or_default();
+    println!(
+        "feeds: {} | avg {avg:?} | p95 {p95:?} | max {max:?} | budget 160ms/chunk → {}",
+        feed_times.len(),
+        if p95.as_millis() < 160 { "REALTIME OK" } else { "TOO SLOW" }
+    );
+    Ok(())
 }
 
 /// Minimal RIFF/WAVE reader: 16 kHz mono 16-bit PCM only (test tooling).

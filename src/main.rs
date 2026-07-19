@@ -18,6 +18,10 @@ pub enum Event {
     Cancel,
     ModelReady,
     Transcribed(Result<String>),
+    /// Streaming: newly committed text to type right now.
+    StreamDelta(String),
+    /// Streaming: session finished (after finalize or abort).
+    StreamDone,
     Quit,
 }
 
@@ -49,8 +53,15 @@ fn main() -> Result<()> {
             println!("{text}");
             Ok(())
         }
+        // Offline streaming test: feed a wav in chunks, print committed deltas.
+        Some("stream-file") => {
+            let path = args.next().context("usage: mynah stream-file <wav>")?;
+            asr::stream_file(std::path::Path::new(&path))
+        }
+        // Print the configured model's capabilities (diagnostics).
+        Some("caps") => asr::print_caps(),
         Some(other) => {
-            eprintln!("usage: mynah [daemon|toggle|cancel|status|quit|transcribe <wav>]");
+            eprintln!("usage: mynah [daemon|toggle|cancel|status|quit|transcribe <wav>|caps]");
             anyhow::bail!("unknown command: {other}");
         }
     }
@@ -70,6 +81,11 @@ fn daemon() -> Result<()> {
     // rejected with a notification.
     let asr = asr::Worker::spawn(tx.clone());
     let mut typer = typer::Typer::new().context("creating uinput keyboard")?;
+
+    let stream_mode = asr::streaming_enabled();
+    if stream_mode {
+        log::info!("live streaming mode enabled");
+    }
 
     let mut capture: Option<audio::Capture> = None;
     let mut overlay: Option<overlay::Overlay> = None;
@@ -97,7 +113,13 @@ fn daemon() -> Result<()> {
                 notify("Model still loading, try again in a moment");
             }
             (Phase::Idle, Event::Toggle) => {
-                match audio::Capture::start(level.clone()) {
+                let sink = if stream_mode {
+                    asr.stream_start();
+                    Some(asr.chunk_sink())
+                } else {
+                    None
+                };
+                match audio::Capture::start(level.clone(), sink) {
                     Ok(c) => {
                         capture = Some(c);
                         overlay = overlay::Overlay::spawn(level.clone())
@@ -108,6 +130,9 @@ fn daemon() -> Result<()> {
                     Err(e) => {
                         log::error!("failed to start capture: {e:#}");
                         notify(&format!("Mic capture failed: {e}"));
+                        if stream_mode {
+                            asr.stream_abort();
+                        }
                     }
                 }
             }
@@ -118,11 +143,28 @@ fn daemon() -> Result<()> {
                         o.set_transcribing();
                     }
                     set_phase(Phase::Transcribing);
-                    asr.transcribe(samples);
+                    if stream_mode {
+                        asr.stream_end();
+                    } else {
+                        asr.transcribe(samples);
+                    }
                 }
             }
             (Phase::Recording, Event::Cancel) => {
                 capture.take().map(|c| c.stop());
+                if stream_mode {
+                    asr.stream_abort();
+                }
+                overlay.take();
+                set_phase(Phase::Idle);
+            }
+            // Live streaming: committed text can never be revised, type it now.
+            (Phase::Recording | Phase::Transcribing, Event::StreamDelta(text)) => {
+                if let Err(e) = typer.type_delta(&text) {
+                    log::error!("typing failed: {e:#}");
+                }
+            }
+            (Phase::Transcribing, Event::StreamDone) => {
                 overlay.take();
                 set_phase(Phase::Idle);
             }
