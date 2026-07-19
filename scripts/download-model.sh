@@ -6,14 +6,12 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}/mynah/models"
 WHICH="${1:-parakeet}"
 
 parakeet() {
-    BASE="https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
-    DIR="${MYNAH_MODEL_DIR:-$DATA/parakeet-tdt-0.6b-v3-int8}"
-    mkdir -p "$DIR"
-    for f in encoder-model.int8.onnx decoder_joint-model.int8.onnx nemo128.onnx vocab.txt; do
-        echo "==> $f"
-        curl -fL --retry 3 -C - -o "$DIR/$f" "$BASE/$f"
-    done
-    echo "Parakeet ready in $DIR"
+    OUT="$DATA/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+    mkdir -p "$DATA"
+    echo "==> parakeet-tdt-0.6b-v3-Q8_0.gguf"
+    curl -fL --retry 3 -C - -o "$OUT" \
+        "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+    echo "Parakeet ready at $OUT"
 }
 
 whisper() {

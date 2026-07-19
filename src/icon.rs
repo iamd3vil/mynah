@@ -27,7 +27,7 @@ fn render(phase: Phase, size: u32) -> ksni::Icon {
     let mut paint = Paint::default();
     paint.anti_alias = true;
 
-    let mut fill = |pm: &mut Pixmap, path: &tiny_skia::Path, color: Color| {
+    let fill = |pm: &mut Pixmap, path: &tiny_skia::Path, color: Color| {
         let mut p = Paint::default();
         p.anti_alias = true;
         p.set_color(color);
