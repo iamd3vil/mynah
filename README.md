@@ -85,7 +85,13 @@ Environment variables (set in the systemd unit if needed):
   `~/.local/share/mynah/models/parakeet-tdt-0.6b-v3-int8`)
 - `MYNAH_WHISPER_MODEL` — whisper gguf path (default
   `~/.local/share/mynah/models/ggml-large-v3-turbo-q5_0.bin`)
-- `MYNAH_LANG` — transcription language hint (default `en`; whisper only)
+- `MYNAH_STREAM=1` — live streaming: text is typed *while you speak* (stable
+  committed prefix only — never revised, so no stray backspaces). Uses the
+  nemotron-3.5-asr-streaming model; download with the script. Trade-off:
+  streaming models are less accurate than batch whisper, and punctuation is
+  sparser. Test throughput offline with `mynah stream-file <wav>`.
+- `MYNAH_LANG` — transcription language hint (default `en`; `en-US` locale
+  form auto-selected for streaming)
 - `RUST_LOG` — log level (default `info`); `journalctl --user -u mynah` to read.
 
 To switch engines: `systemctl --user edit mynah`, add
