@@ -23,9 +23,19 @@ whisper() {
     echo "Whisper ready at $OUT"
 }
 
+streaming() {
+    OUT="$DATA/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
+    mkdir -p "$DATA"
+    echo "==> nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
+    curl -fL --retry 3 -C - -o "$OUT" \
+        "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
+    echo "Streaming model ready at $OUT"
+}
+
 case "$WHICH" in
     parakeet) parakeet ;;
     whisper) whisper ;;
-    all) parakeet; whisper ;;
-    *) echo "usage: $0 [parakeet|whisper|all]" >&2; exit 1 ;;
+    streaming) streaming ;;
+    all) parakeet; whisper; streaming ;;
+    *) echo "usage: $0 [parakeet|whisper|streaming|all]" >&2; exit 1 ;;
 esac

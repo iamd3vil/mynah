@@ -1,15 +1,20 @@
 # mynah
 
 Voice-to-text daemon for KDE Plasma on Wayland. Press a hotkey, speak, press it
-again — mynah transcribes locally with NVIDIA Parakeet TDT 0.6B v3 and types the
-result into whatever has focus, terminals included.
+again — mynah transcribes locally (Parakeet TDT v3 or Whisper large-v3-turbo,
+GPU-accelerated via Vulkan) and types the result into whatever has focus,
+terminals included.
 
 Named after the mynah bird, which mimics human speech.
 
 ## How it works
 
-- **Transcription**: [Parakeet TDT 0.6B v3](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx)
-  (int8 ONNX) via [`transcribe-rs`](https://github.com/cjpais/transcribe-rs), fully offline.
+- **Transcription**: [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp)
+  (unified ggml inference engine, Vulkan GPU offload) via the
+  [`transcribe-cpp`](https://crates.io/crates/transcribe-cpp) crate, fully
+  offline. Engines: Parakeet TDT 0.6B v3 (fast) or Whisper large-v3-turbo
+  (better on accented English); optional live streaming with
+  nemotron-3.5-asr-streaming.
 - **Typing**: a uinput virtual keyboard — raw keystrokes, so it works in every
   app (no clipboard, no Ctrl+V). US layout; typographic characters are
   normalized to ASCII.
@@ -21,12 +26,19 @@ Named after the mynah bird, which mimics human speech.
 ## Setup
 
 ```sh
+# 0. Build prerequisites: a C++ toolchain, cmake, and for the (default)
+#    Vulkan backend: vulkan-headers, spirv-headers, shaderc (glslc).
+#    transcribe-cpp-sys 0.1.3 also forgets to link CBLAS on Linux;
+#    build.rs works around it (needs a system cblas).
+
 # 1. Build and install the binary
 cargo build --release
 install -Dm755 target/release/mynah ~/.local/bin/mynah
 
-# 2. Download the model (~700 MB, one time)
-scripts/download-model.sh
+# 2. Download a model (one time): parakeet (default, ~640 MB),
+#    whisper (~550 MB), or all
+scripts/download-model.sh parakeet
+scripts/download-model.sh whisper   # optional, for MYNAH_ENGINE=whisper
 
 # 3. uinput access (skip if /dev/uinput is already writable)
 sudo tee /etc/udev/rules.d/60-mynah-uinput.rules <<'EOF'
@@ -60,12 +72,15 @@ systemctl --user enable --now mynah
 
 ## Usage
 
-| Command        | Effect                                        |
-|----------------|-----------------------------------------------|
-| `mynah toggle` | start recording / stop-transcribe-and-type    |
-| `mynah cancel` | discard the current recording                 |
-| `mynah status` | print `idle` / `recording` / `transcribing`   |
-| `mynah quit`   | stop the daemon                               |
+| Command                  | Effect                                        |
+|--------------------------|-----------------------------------------------|
+| `mynah toggle`           | start recording / stop-transcribe-and-type    |
+| `mynah cancel`           | discard the current recording                 |
+| `mynah status`           | print `idle` / `recording` / `transcribing`   |
+| `mynah quit`             | stop the daemon                               |
+| `mynah transcribe <wav>` | transcribe a 16 kHz mono wav (testing)        |
+| `mynah stream-file <wav>`| offline streaming test with feed timings      |
+| `mynah caps`             | print the configured model's capabilities     |
 
 Left-clicking the tray icon also toggles.
 
@@ -73,23 +88,16 @@ Left-clicking the tray icon also toggles.
 
 Environment variables (set in the systemd unit if needed):
 
-- `MYNAH_ENGINE` — `parakeet` (default, near-instant) or `whisper`
-  (large-v3-turbo; much better on accented English). Whisper needs its model
-  downloaded first: `scripts/download-model.sh whisper`.
-  CAUTION: CPU-only whisper costs ~20s per utterance regardless of length
-  (fixed 30s encoder window) — build with Vulkan for dictation use.
-- `MYNAH_WHISPER_THREADS` — CPU threads for whisper (default: physical cores)
-- `MYNAH_WHISPER_BEAM` — beam size for whisper (default greedy; barely
-  matters for turbo's 4-layer decoder)
-- `MYNAH_MODEL_DIR` — parakeet model directory (default
-  `~/.local/share/mynah/models/parakeet-tdt-0.6b-v3-int8`)
-- `MYNAH_WHISPER_MODEL` — whisper gguf path (default
-  `~/.local/share/mynah/models/ggml-large-v3-turbo-q5_0.bin`)
+- `MYNAH_ENGINE` — `parakeet` (default; ~0.5s per utterance on an iGPU) or
+  `whisper` (large-v3-turbo, ~2s; much better on accented English). Each needs
+  its model downloaded first (`scripts/download-model.sh`).
+- `MYNAH_MODEL` — override the model path entirely (any gguf transcribe.cpp
+  supports; whisper.cpp `.bin` files also load).
 - `MYNAH_STREAM=1` — live streaming: text is typed *while you speak* (stable
   committed prefix only — never revised, so no stray backspaces). Uses the
-  nemotron-3.5-asr-streaming model; download with the script. Trade-off:
-  streaming models are less accurate than batch whisper, and punctuation is
-  sparser. Test throughput offline with `mynah stream-file <wav>`.
+  nemotron-3.5-asr-streaming model (`scripts/download-model.sh streaming`).
+  Trade-off: streaming models are less accurate than batch whisper, and
+  punctuation is sparser. Test throughput with `mynah stream-file <wav>`.
 - `MYNAH_LANG` — transcription language hint (default `en`; `en-US` locale
   form auto-selected for streaming)
 - `RUST_LOG` — log level (default `info`); `journalctl --user -u mynah` to read.
@@ -98,7 +106,6 @@ To switch engines: `systemctl --user edit mynah`, add
 `[Service]` / `Environment=MYNAH_ENGINE=whisper`, then
 `systemctl --user restart mynah`.
 
-Whisper runs CPU-only unless whisper.cpp is built with Vulkan: install
-`vulkan-headers`, then `cargo build --release --features whisper-vulkan`
-(the whisper encoder is the bottleneck; the iGPU takes it from ~20s to a few
-seconds per utterance).
+All engines run on the GPU via Vulkan when available (`Backend::Auto` probes
+discrete GPUs, then integrated, then CPU). Timings above are from a Radeon
+860M iGPU; CPU-only whisper is ~20s per utterance and not dictation-friendly.
