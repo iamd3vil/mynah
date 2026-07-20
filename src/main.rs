@@ -87,11 +87,7 @@ fn daemon() -> Result<()> {
         log::info!("live streaming mode enabled");
     }
 
-    // Persistent mic stream (pre-roll ring buffer); rebuilt on demand if the
-    // device wasn't available at startup.
-    let mut engine: Option<audio::AudioEngine> = audio::AudioEngine::new(level.clone())
-        .map_err(|e| log::error!("audio engine: {e:#}"))
-        .ok();
+    let mut capture: Option<audio::Capture> = None;
     let mut overlay: Option<overlay::Overlay> = None;
 
     let set_phase = |p: Phase| {
@@ -117,30 +113,32 @@ fn daemon() -> Result<()> {
                 notify("Model still loading, try again in a moment");
             }
             (Phase::Idle, Event::Toggle) => {
-                if engine.is_none() {
-                    engine = audio::AudioEngine::new(level.clone())
-                        .map_err(|e| {
-                            log::error!("audio engine: {e:#}");
-                            notify(&format!("Mic capture failed: {e}"));
-                        })
-                        .ok();
-                }
-                let Some(eng) = engine.as_ref() else { continue };
                 let sink = if stream_mode {
                     asr.stream_start();
                     Some(asr.chunk_sink())
                 } else {
                     None
                 };
-                eng.start_recording(sink);
-                overlay = overlay::Overlay::spawn(level.clone())
-                    .map_err(|e| log::error!("overlay failed: {e:#}"))
-                    .ok();
-                set_phase(Phase::Recording);
+                match audio::Capture::start(level.clone(), sink) {
+                    Ok(c) => {
+                        capture = Some(c);
+                        overlay = overlay::Overlay::spawn(level.clone())
+                            .map_err(|e| log::error!("overlay failed: {e:#}"))
+                            .ok();
+                        set_phase(Phase::Recording);
+                    }
+                    Err(e) => {
+                        log::error!("failed to start capture: {e:#}");
+                        notify(&format!("Mic capture failed: {e}"));
+                        if stream_mode {
+                            asr.stream_abort();
+                        }
+                    }
+                }
             }
             (Phase::Recording, Event::Toggle) => {
-                if let Some(eng) = engine.as_ref() {
-                    let samples = eng.stop_recording();
+                if let Some(c) = capture.take() {
+                    let samples = c.stop();
                     if let Some(o) = overlay.as_ref() {
                         o.set_transcribing();
                     }
@@ -153,9 +151,7 @@ fn daemon() -> Result<()> {
                 }
             }
             (Phase::Recording, Event::Cancel) => {
-                if let Some(eng) = engine.as_ref() {
-                    eng.stop_recording();
-                }
+                capture.take().map(|c| c.stop());
                 if stream_mode {
                     asr.stream_abort();
                 }
@@ -194,6 +190,7 @@ fn daemon() -> Result<()> {
         }
     }
 
+    capture.take().map(|c| c.stop());
     Ok(())
 }
 
