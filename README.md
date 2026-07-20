@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" width="120" alt="mynah — a plump white bird with an amber beak">
+</p>
+
 # mynah
 
 Voice-to-text daemon for KDE Plasma on Wayland. Press a hotkey, speak, press it
