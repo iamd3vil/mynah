@@ -59,7 +59,11 @@ impl Overlay {
             })
             .context("spawning overlay thread")?;
 
-        Ok(Self { running, transcribing, thread: Some(thread) })
+        Ok(Self {
+            running,
+            transcribing,
+            thread: Some(thread),
+        })
     }
 
     pub fn set_transcribing(&self) {
@@ -94,7 +98,9 @@ fn run(level: Level, running: Arc<AtomicBool>, transcribing: Arc<AtomicBool>) ->
 
     // Click-through: empty input region so the pill never swallows clicks.
     if let Ok(region) = Region::new(&compositor) {
-        layer.wl_surface().set_input_region(Some(region.wl_region()));
+        layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
     }
     layer.commit();
 
@@ -116,8 +122,7 @@ fn run(level: Level, running: Arc<AtomicBool>, transcribing: Arc<AtomicBool>) ->
     // Dispatch with a timeout so the `running` flag is honored within ~100ms
     // even if the compositor stops sending frame callbacks; otherwise
     // Overlay::drop's join could stall the main state machine.
-    let mut event_loop =
-        calloop::EventLoop::<State>::try_new().context("creating event loop")?;
+    let mut event_loop = calloop::EventLoop::<State>::try_new().context("creating event loop")?;
     calloop_wayland_source::WaylandSource::new(conn.clone(), queue)
         .insert(event_loop.handle())
         .map_err(|e| anyhow::anyhow!("inserting wayland source: {e}"))?;
@@ -158,11 +163,19 @@ impl State {
         let stride = WIDTH as i32 * 4;
         let (buffer, canvas) = self
             .pool
-            .create_buffer(WIDTH as i32, HEIGHT as i32, stride, wl_shm::Format::Argb8888)
+            .create_buffer(
+                WIDTH as i32,
+                HEIGHT as i32,
+                stride,
+                wl_shm::Format::Argb8888,
+            )
             .expect("create buffer");
 
         // tiny-skia is RGBA premultiplied; wl ARGB8888 little-endian is B,G,R,A.
-        for (dst, src) in canvas.chunks_exact_mut(4).zip(pixmap.data().chunks_exact(4)) {
+        for (dst, src) in canvas
+            .chunks_exact_mut(4)
+            .zip(pixmap.data().chunks_exact(4))
+        {
             dst[0] = src[2];
             dst[1] = src[1];
             dst[2] = src[0];
@@ -247,10 +260,38 @@ fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> tiny_skia::Path {
 }
 
 impl CompositorHandler for State {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: i32,
+    ) {
+    }
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: wl_output::Transform,
+    ) {
+    }
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
 
     fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
         self.draw(qh);

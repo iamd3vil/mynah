@@ -104,6 +104,8 @@ Environment variables (set in the systemd unit if needed):
   punctuation is sparser. Test throughput with `mynah stream-file <wav>`.
 - `MYNAH_LANG` — transcription language hint (default `en`; `en-US` locale
   form auto-selected for streaming)
+- `MYNAH_SOUNDS` — set to `0`, `false`, or `off` to disable the brief start and
+  stop recording tones (enabled by default)
 - `RUST_LOG` — log level (default `info`); `journalctl --user -u mynah` to read.
 
 To switch engines: `systemctl --user edit mynah`, add

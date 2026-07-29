@@ -79,8 +79,8 @@ impl Asr {
             "model missing at {} (run scripts/download-model.sh)",
             path.display()
         );
-        let model = Model::load(&path)
-            .with_context(|| format!("loading model {}", path.display()))?;
+        let model =
+            Model::load(&path).with_context(|| format!("loading model {}", path.display()))?;
         if streaming_enabled() {
             anyhow::ensure!(
                 model.capabilities().supports_streaming,
@@ -172,7 +172,9 @@ impl Worker {
     }
 
     pub fn transcribe(&self, samples: Vec<f32>) {
-        self.jobs.send(Job::Batch(samples)).expect("asr thread died");
+        self.jobs
+            .send(Job::Batch(samples))
+            .expect("asr thread died");
     }
 
     pub fn stream_start(&self) {
@@ -294,17 +296,25 @@ pub fn stream_file(path: &std::path::Path) -> Result<()> {
     let mut emitted = 0usize;
     for chunk in samples.chunks(2560) {
         let t = std::time::Instant::now();
-        let update = stream.feed(chunk).map_err(|e| anyhow::anyhow!("feed: {e}"))?;
+        let update = stream
+            .feed(chunk)
+            .map_err(|e| anyhow::anyhow!("feed: {e}"))?;
         feed_times.push(t.elapsed());
         if update.committed_changed {
             let committed = stream.text().committed;
             if committed.len() > emitted {
-                println!("[{:>5.1}s] +{:?}", samples.len() as f32 / 16000.0, &committed[emitted..]);
+                println!(
+                    "[{:>5.1}s] +{:?}",
+                    samples.len() as f32 / 16000.0,
+                    &committed[emitted..]
+                );
                 emitted = committed.len();
             }
         }
     }
-    stream.finalize().map_err(|e| anyhow::anyhow!("finalize: {e}"))?;
+    stream
+        .finalize()
+        .map_err(|e| anyhow::anyhow!("finalize: {e}"))?;
     println!("final: {:?}", stream.text().committed);
 
     let avg = feed_times.iter().sum::<std::time::Duration>() / feed_times.len().max(1) as u32;
@@ -321,7 +331,11 @@ pub fn stream_file(path: &std::path::Path) -> Result<()> {
     println!(
         "feeds: {} | avg {avg:?} | p95 {p95:?} | max {max:?} | budget 160ms/chunk → {}",
         feed_times.len(),
-        if p95.as_millis() < 160 { "REALTIME OK" } else { "TOO SLOW" }
+        if p95.as_millis() < 160 {
+            "REALTIME OK"
+        } else {
+            "TOO SLOW"
+        }
     );
     Ok(())
 }
@@ -329,7 +343,10 @@ pub fn stream_file(path: &std::path::Path) -> Result<()> {
 /// Minimal RIFF/WAVE reader: 16 kHz mono 16-bit PCM only (test tooling).
 fn read_wav_16k_mono(path: &std::path::Path) -> Result<Vec<f32>> {
     let bytes = std::fs::read(path)?;
-    anyhow::ensure!(bytes.len() > 44 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE", "not a wav file");
+    anyhow::ensure!(
+        bytes.len() > 44 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE",
+        "not a wav file"
+    );
     let mut pos = 12;
     while pos + 8 <= bytes.len() {
         let id = &bytes[pos..pos + 4];

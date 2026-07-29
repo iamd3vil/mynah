@@ -77,7 +77,11 @@ impl Capture {
             .context("building input stream")?;
         stream.play().context("starting input stream")?;
 
-        Ok(Self { _stream: stream, buf, rate })
+        Ok(Self {
+            _stream: stream,
+            buf,
+            rate,
+        })
     }
 
     /// Stop capturing and return the samples as 16 kHz mono.

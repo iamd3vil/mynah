@@ -43,7 +43,8 @@ fn render(phase: Phase, size: u32) -> ksni::Icon {
     fill(&mut pixmap, &pb.finish().unwrap(), body_color);
 
     // Body: plump ellipse, slightly tilted.
-    let body = PathBuilder::from_oval(tiny_skia::Rect::from_xywh(16.0, 38.0, 56.0, 46.0).unwrap()).unwrap();
+    let body = PathBuilder::from_oval(tiny_skia::Rect::from_xywh(16.0, 38.0, 56.0, 46.0).unwrap())
+        .unwrap();
     fill(&mut pixmap, &body, body_color);
 
     // Head: circle overlapping the body's front.
@@ -59,7 +60,8 @@ fn render(phase: Phase, size: u32) -> ksni::Icon {
     fill(&mut pixmap, &pb.finish().unwrap(), amber);
 
     // Mynah's yellow eye patch: crescent behind the eye.
-    let patch = PathBuilder::from_oval(tiny_skia::Rect::from_xywh(52.0, 20.0, 18.0, 12.0).unwrap()).unwrap();
+    let patch = PathBuilder::from_oval(tiny_skia::Rect::from_xywh(52.0, 20.0, 18.0, 12.0).unwrap())
+        .unwrap();
     fill(&mut pixmap, &patch, amber);
 
     // Eye.
@@ -88,7 +90,11 @@ fn render(phase: Phase, size: u32) -> ksni::Icon {
         data.extend_from_slice(&[px.alpha(), px.red(), px.green(), px.blue()]);
     }
 
-    ksni::Icon { width: size as i32, height: size as i32, data }
+    ksni::Icon {
+        width: size as i32,
+        height: size as i32,
+        data,
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +104,9 @@ mod tests {
     /// Render preview PNGs (dev aid): MYNAH_ICON_PREVIEW_DIR=... cargo test icon
     #[test]
     fn icon_preview() {
-        let Ok(dir) = std::env::var("MYNAH_ICON_PREVIEW_DIR") else { return };
+        let Ok(dir) = std::env::var("MYNAH_ICON_PREVIEW_DIR") else {
+            return;
+        };
         for (phase, name) in [
             (Phase::Idle, "idle"),
             (Phase::Recording, "recording"),
@@ -107,8 +115,13 @@ mod tests {
         ] {
             let mut pixmap = Pixmap::new(128, 128).unwrap();
             let icon = render(phase, 128);
-            for (px, chunk) in pixmap.pixels_mut().iter_mut().zip(icon.data.chunks_exact(4)) {
-                *px = tiny_skia::ColorU8::from_rgba(chunk[1], chunk[2], chunk[3], chunk[0]).premultiply();
+            for (px, chunk) in pixmap
+                .pixels_mut()
+                .iter_mut()
+                .zip(icon.data.chunks_exact(4))
+            {
+                *px = tiny_skia::ColorU8::from_rgba(chunk[1], chunk[2], chunk[3], chunk[0])
+                    .premultiply();
             }
             pixmap.save_png(format!("{dir}/{name}.png")).unwrap();
         }

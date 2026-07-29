@@ -3,6 +3,7 @@ mod audio;
 mod icon;
 mod overlay;
 mod sock;
+mod sound;
 mod tray;
 mod typer;
 
@@ -119,6 +120,8 @@ fn daemon() -> Result<()> {
                 } else {
                     None
                 };
+                // Play before opening the mic so the cue is never included in the transcription.
+                sound::play(sound::Cue::Start);
                 match audio::Capture::start(level.clone(), sink) {
                     Ok(c) => {
                         capture = Some(c);
@@ -139,6 +142,7 @@ fn daemon() -> Result<()> {
             (Phase::Recording, Event::Toggle) => {
                 if let Some(c) = capture.take() {
                     let samples = c.stop();
+                    sound::play(sound::Cue::Stop);
                     if let Some(o) = overlay.as_ref() {
                         o.set_transcribing();
                     }
@@ -151,7 +155,10 @@ fn daemon() -> Result<()> {
                 }
             }
             (Phase::Recording, Event::Cancel) => {
-                capture.take().map(|c| c.stop());
+                if let Some(c) = capture.take() {
+                    c.stop();
+                    sound::play(sound::Cue::Stop);
+                }
                 if stream_mode {
                     asr.stream_abort();
                 }

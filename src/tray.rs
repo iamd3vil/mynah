@@ -98,8 +98,11 @@ impl Tray {
 }
 
 pub fn spawn(tx: Sender<Event>) -> Result<Tray> {
-    let handle = MynahTray { phase: Phase::Loading, tx }
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("tray: {e}"))?;
+    let handle = MynahTray {
+        phase: Phase::Loading,
+        tx,
+    }
+    .spawn()
+    .map_err(|e| anyhow::anyhow!("tray: {e}"))?;
     Ok(Tray { handle })
 }

@@ -21,43 +21,48 @@ pub fn listen(tx: Sender<Event>, phase: Arc<Mutex<Phase>>) -> Result<()> {
     if sock.exists() {
         // Stale socket from a previous run, or another daemon is alive.
         if UnixStream::connect(&sock).is_ok() {
-            anyhow::bail!("another mynah daemon is already running on {}", sock.display());
+            anyhow::bail!(
+                "another mynah daemon is already running on {}",
+                sock.display()
+            );
         }
         std::fs::remove_file(&sock)?;
     }
     let listener = UnixListener::bind(&sock).with_context(|| format!("bind {}", sock.display()))?;
 
-    std::thread::Builder::new().name("sock".into()).spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { continue };
-            let mut buf = String::new();
-            if stream.read_to_string(&mut buf).is_err() {
-                continue;
+    std::thread::Builder::new()
+        .name("sock".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = String::new();
+                if stream.read_to_string(&mut buf).is_err() {
+                    continue;
+                }
+                let reply = match buf.trim() {
+                    "toggle" => {
+                        tx.send(Event::Toggle).ok();
+                        "ok"
+                    }
+                    "cancel" => {
+                        tx.send(Event::Cancel).ok();
+                        "ok"
+                    }
+                    "quit" => {
+                        tx.send(Event::Quit).ok();
+                        "ok"
+                    }
+                    "status" => match *phase.lock().unwrap() {
+                        Phase::Loading => "loading",
+                        Phase::Idle => "idle",
+                        Phase::Recording => "recording",
+                        Phase::Transcribing => "transcribing",
+                    },
+                    _ => "unknown command",
+                };
+                let _ = stream.write_all(reply.as_bytes());
             }
-            let reply = match buf.trim() {
-                "toggle" => {
-                    tx.send(Event::Toggle).ok();
-                    "ok"
-                }
-                "cancel" => {
-                    tx.send(Event::Cancel).ok();
-                    "ok"
-                }
-                "quit" => {
-                    tx.send(Event::Quit).ok();
-                    "ok"
-                }
-                "status" => match *phase.lock().unwrap() {
-                    Phase::Loading => "loading",
-                    Phase::Idle => "idle",
-                    Phase::Recording => "recording",
-                    Phase::Transcribing => "transcribing",
-                },
-                _ => "unknown command",
-            };
-            let _ = stream.write_all(reply.as_bytes());
-        }
-    })?;
+        })?;
     Ok(())
 }
 
