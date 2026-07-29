@@ -108,6 +108,25 @@ Environment variables (set in the systemd unit if needed):
   stop recording tones (enabled by default)
 - `RUST_LOG` — log level (default `info`); `journalctl --user -u mynah` to read.
 
+### Vocabulary corrections
+
+Create `~/.config/mynah/vocabulary.txt` with one `misheard => desired` rule per
+line. Blank lines and lines beginning with `#` are ignored:
+
+```text
+# ASR output => spelling to type
+kite connect => Kite Connect
+cargo toml => Cargo.toml
+mynah => mynah
+```
+
+Rules match complete ASCII case-insensitive words or phrases, with longer
+phrases taking precedence. Corrections are applied before batch transcription
+is typed. When `MYNAH_ENGINE=whisper`, desired terms are also passed to
+Whisper as an initial vocabulary prompt. Streaming transcription types an
+irreversible committed prefix, so it does not apply vocabulary corrections.
+Restart the service after changing the file.
+
 To switch engines: `systemctl --user edit mynah`, add
 `[Service]` / `Environment=MYNAH_ENGINE=whisper`, then
 `systemctl --user restart mynah`.

@@ -153,8 +153,7 @@ impl State {
         // Shift in the latest mic level; keep a rolling window of bar heights.
         let rms = f32::from_bits(self.level.load(Ordering::Relaxed));
         self.bars.pop_front();
-        // Perceptual-ish scaling: mic RMS for speech is roughly 0.005–0.2.
-        self.bars.push_back((rms * 12.0).powf(0.6).min(1.0));
+        self.bars.push_back(meter_height(rms));
         self.tick = self.tick.wrapping_add(1);
 
         let mut pixmap = Pixmap::new(WIDTH, HEIGHT).expect("pixmap");
@@ -241,6 +240,33 @@ impl State {
                 pixmap.fill_path(&p, &fg, FillRule::Winding, Transform::identity(), None);
             }
         }
+    }
+}
+
+/// Map a raw RMS level to a display height without assuming a device gain.
+///
+/// The old linear multiplier reached full height at 0.083 RMS. That is a
+/// routine level for amplified internal laptop microphones, so they appeared
+/// permanently saturated. Decibels represent the wide range of microphone
+/// gains more naturally and reserve the top of the meter for near-clipping.
+fn meter_height(rms: f32) -> f32 {
+    const FLOOR_DB: f32 = -50.0;
+    const CEILING_DB: f32 = 0.0;
+
+    let db = 20.0 * rms.max(1e-6).log10();
+    let normalized = ((db - FLOOR_DB) / (CEILING_DB - FLOOR_DB)).clamp(0.0, 1.0);
+    normalized.powf(0.7)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::meter_height;
+
+    #[test]
+    fn meter_preserves_headroom_for_amplified_microphones() {
+        assert!(meter_height(0.1) < 0.8);
+        assert!(meter_height(0.2) > meter_height(0.02));
+        assert_eq!(meter_height(1.0), 1.0);
     }
 }
 

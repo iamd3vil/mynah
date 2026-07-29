@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 
 use anyhow::{Context, Result};
-use transcribe_cpp::{Model, RunOptions, Session, StreamOptions};
+use transcribe_cpp::{Model, RunExtension, RunOptions, Session, StreamOptions, WhisperRunOptions};
 
 use crate::Event;
 
@@ -68,6 +68,8 @@ fn stream_run_options() -> RunOptions {
 
 struct Asr {
     session: Session,
+    vocabulary: crate::vocabulary::Vocabulary,
+    is_whisper: bool,
 }
 
 impl Asr {
@@ -90,8 +92,13 @@ impl Asr {
                 model.arch()
             );
         }
+        let is_whisper = model.arch().eq_ignore_ascii_case("whisper");
         let session = model.session().context("opening session")?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            vocabulary: crate::vocabulary::Vocabulary::load()?,
+            is_whisper,
+        })
     }
 
     fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
@@ -99,13 +106,23 @@ impl Asr {
             // Pinned language (default "en") — auto-detect adds latency and
             // can misfire on short dictation clips.
             language: Some(language()),
+            family: self
+                .is_whisper
+                .then(|| self.vocabulary.whisper_prompt())
+                .flatten()
+                .map(|initial_prompt| {
+                    RunExtension::Whisper(WhisperRunOptions {
+                        initial_prompt: Some(initial_prompt),
+                        ..Default::default()
+                    })
+                }),
             ..Default::default()
         };
         let transcript = self
             .session
             .run(samples, &options)
             .map_err(|e| anyhow::anyhow!("inference: {e}"))?;
-        Ok(transcript.text.trim().to_string())
+        Ok(self.vocabulary.correct(transcript.text.trim()))
     }
 }
 

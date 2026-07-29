@@ -6,6 +6,7 @@ mod sock;
 mod sound;
 mod tray;
 mod typer;
+mod vocabulary;
 
 use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;

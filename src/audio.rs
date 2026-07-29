@@ -46,9 +46,11 @@ impl Capture {
                 config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     let mut buf = buf2.lock().unwrap();
+                    let mut sum = 0.0f32;
                     let mut sum_sq = 0.0f32;
                     for frame in data.chunks_exact(channels) {
                         let mono = frame.iter().sum::<f32>() / channels as f32;
+                        sum += mono;
                         sum_sq += mono * mono;
                         buf.push(mono);
                         if chunk_sink.is_some() {
@@ -56,7 +58,12 @@ impl Capture {
                         }
                     }
                     drop(buf);
-                    let rms = (sum_sq / (data.len() / channels).max(1) as f32).sqrt();
+                    // Some internal microphones expose a large DC offset. A raw RMS
+                    // treats that offset as sound and pins the visual meter at full height,
+                    // so measure the AC component (standard deviation) instead.
+                    let frames = (data.len() / channels).max(1) as f32;
+                    let mean = sum / frames;
+                    let rms = (sum_sq / frames - mean * mean).max(0.0).sqrt();
                     level.store(rms.to_bits(), Ordering::Relaxed);
 
                     if let Some(sink) = &chunk_sink {
@@ -157,4 +164,18 @@ fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
         out.push(a + (b - a) * frac);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn dc_offset_does_not_count_as_mic_level() {
+        let samples = [0.3_f32; 480];
+        let sum = samples.iter().sum::<f32>();
+        let sum_sq = samples.iter().map(|sample| sample * sample).sum::<f32>();
+        let frames = samples.len() as f32;
+        let rms = (sum_sq / frames - (sum / frames).powi(2)).max(0.0).sqrt();
+
+        assert!(rms < 1e-3);
+    }
 }
