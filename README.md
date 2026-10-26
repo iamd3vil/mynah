@@ -27,33 +27,28 @@ Named after the mynah bird, which mimics human speech.
 - **UI**: a Plasma tray icon (StatusNotifierItem) plus a layer-shell pill at the
   bottom of the screen showing a live waveform while recording.
 
-## Setup
+## Install
+
+Needs x86-64 Linux with KDE Plasma 6 on Wayland, glibc 2.39+ (Ubuntu 24.04+,
+Fedora 40+, Debian 13, Arch), an AVX2 CPU, a Vulkan GPU driver (Mesa or
+NVIDIA, standard on desktops) and curl.
 
 ```sh
-# 0. Build prerequisites: a C++ toolchain, cmake, and for the (default)
-#    Vulkan backend: vulkan-headers, spirv-headers, shaderc (glslc).
+# 1. Install the binary from the latest release
+curl -fL https://github.com/iamd3vil/mynah/releases/latest/download/mynah-x86_64-linux.tar.gz | tar xz
+install -Dm755 mynah-x86_64-linux/mynah ~/.local/bin/mynah
 
-# 1. Build and install the binary
-cargo build --release
-install -Dm755 target/release/mynah ~/.local/bin/mynah
+# 2. Pick and download models (or name them: mynah download parakeet cohere).
+#    If /dev/uinput isn't writable it also prints the one-time udev rule
+#    that lets mynah type.
+mynah download
 
-# 2. Download a model (one time): parakeet (default, ~740 MB),
-#    cohere (~1.6 GB), whisper (~550 MB), streaming (~730 MB), or all
-scripts/download-model.sh parakeet
-scripts/download-model.sh cohere    # optional, for MYNAH_ENGINE=cohere
-
-# 3. uinput access (skip if /dev/uinput is already writable)
-sudo tee /etc/udev/rules.d/60-mynah-uinput.rules <<'EOF'
-KERNEL=="uinput", GROUP="input", MODE="0660", TAG+="uaccess"
-EOF
-sudo udevadm control --reload && sudo udevadm trigger /dev/uinput
-
-# 4. Run as a user service
-install -Dm644 dist/mynah.service ~/.config/systemd/user/mynah.service
+# 3. Run as a user service
+install -Dm644 mynah-x86_64-linux/mynah.service ~/.config/systemd/user/mynah.service
 systemctl --user daemon-reload
 systemctl --user enable --now mynah
 
-# 5. Bind a key in KDE
+# 4. Bind a key in KDE
 # System Settings → Keyboard → Shortcuts → Add New → Command or Script:
 #   command: ~/.local/bin/mynah toggle
 # and assign e.g. Meta+H.
@@ -72,6 +67,17 @@ systemctl --user enable --now mynah
 #   ~/.local/share/applications (and/or ~/.local/share/kglobalaccel).
 ```
 
+### Building from source
+
+Needs Rust, a C++ toolchain, cmake, and for the Vulkan backend
+vulkan-headers, spirv-headers and shaderc (glslc). Releases are built by
+`.github/workflows/release.yml` on tag push.
+
+```sh
+cargo build --release
+install -Dm755 target/release/mynah ~/.local/bin/mynah
+```
+
 ## Usage
 
 | Command                  | Effect                                        |
@@ -80,6 +86,7 @@ systemctl --user enable --now mynah
 | `mynah cancel`           | discard the current recording                 |
 | `mynah status`           | print `idle` / `recording` / `transcribing`   |
 | `mynah quit`             | stop the daemon                               |
+| `mynah download [model...]` | pick and download models                   |
 | `mynah transcribe <wav>...` | transcribe 16 kHz mono wavs, one line each (testing) |
 | `mynah stream-file <wav>`| offline streaming test with feed timings      |
 | `mynah caps`             | print the configured model's capabilities     |
@@ -90,16 +97,15 @@ Left-clicking the tray icon also toggles.
 
 Environment variables (set in the systemd unit if needed):
 
-- `MYNAH_ENGINE` — `parakeet` (default; Parakeet Ultra), `cohere` (Cohere
-  Transcribe 2B, most accurate, ~3x slower), or `whisper` (large-v3-turbo;
-  slower and less accurate than cohere, but biased by `vocabulary.txt`). Each
-  needs its model downloaded first (`scripts/download-model.sh`). See
-  [Benchmarks](#benchmarks).
+- `MYNAH_ENGINE` — `parakeet` (Parakeet Ultra), `cohere` (Cohere Transcribe
+  2B, most accurate, ~3x slower), or `whisper` (large-v3-turbo; slower and
+  less accurate than cohere, but biased by `vocabulary.txt`). Unset: the first
+  of those that's downloaded (`mynah download`). See [Benchmarks](#benchmarks).
 - `MYNAH_MODEL` — override the model path entirely (any gguf transcribe.cpp
   supports; whisper.cpp `.bin` files also load).
 - `MYNAH_STREAM=1` — live streaming: text is typed *while you speak* (stable
   committed prefix only — never revised, so no stray backspaces). Uses the
-  parakeet-unified-en model (`scripts/download-model.sh streaming`).
+  parakeet-unified-en model (`mynah download streaming`).
   Trade-off: streaming is less accurate than batch, and punctuation is
   sparser. Test throughput with `mynah stream-file <wav>`.
 - `MYNAH_LANG` — transcription language hint (default `en`; matched to the

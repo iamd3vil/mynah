@@ -18,39 +18,34 @@ use std::sync::mpsc::{self, Sender};
 use anyhow::{Context, Result};
 use transcribe_cpp::{Feature, Model, RunOptions, Session, StreamOptions};
 
-use crate::Event;
+use crate::{Event, models};
 
 /// Live streaming mode: type committed text while speaking (MYNAH_STREAM=1).
 pub fn streaming_enabled() -> bool {
     std::env::var("MYNAH_STREAM").is_ok_and(|v| v == "1")
 }
 
-fn data_dir() -> PathBuf {
-    let data = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").expect("HOME not set")).join(".local/share")
-        });
-    data.join("mynah/models")
-}
-
 fn model_path() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("MYNAH_MODEL") {
         return Ok(PathBuf::from(path));
     }
-    if streaming_enabled() {
-        // Streaming needs a streaming-capable model; the batch engines
-        // aren't. parakeet-unified beats nemotron-3.5-asr-streaming on WER.
-        return Ok(data_dir().join("parakeet-unified-en-0.6b-Q8_0.gguf"));
-    }
-    let engine = std::env::var("MYNAH_ENGINE").unwrap_or_else(|_| "parakeet".into());
-    match engine.as_str() {
-        "parakeet" => Ok(data_dir().join("parakeet-ultra-Q8_0.gguf")),
-        "cohere" => Ok(data_dir().join("cohere-transcribe-03-2026-Q4_K_M.gguf")),
-        // whisper.cpp .bin files load directly (backward compatible).
-        "whisper" => Ok(data_dir().join("ggml-large-v3-turbo-q5_0.bin")),
-        other => anyhow::bail!("unknown MYNAH_ENGINE {other:?} (use parakeet, cohere or whisper)"),
-    }
+    // Streaming needs a streaming-capable model; the batch engines aren't.
+    let engine = if streaming_enabled() {
+        "streaming".to_string()
+    } else {
+        // Unset: the first downloaded batch engine, in catalog order.
+        std::env::var("MYNAH_ENGINE").unwrap_or_else(|_| {
+            models::MODELS
+                .iter()
+                .find(|m| m.name != "streaming" && m.path().exists())
+                .map_or("parakeet", |m| m.name)
+                .into()
+        })
+    };
+    let model = models::find(&engine).with_context(|| {
+        format!("unknown MYNAH_ENGINE {engine:?} (use parakeet, cohere or whisper)")
+    })?;
+    Ok(model.path())
 }
 
 /// MYNAH_LANG (default "en") matched to the model's language list: locale
@@ -82,7 +77,7 @@ impl Asr {
         log::info!("loading model {}", path.display());
         anyhow::ensure!(
             path.exists(),
-            "model missing at {} (run scripts/download-model.sh)",
+            "model missing at {} (run `mynah download`)",
             path.display()
         );
         let model =
@@ -228,11 +223,7 @@ impl Worker {
 /// Drive one live-streaming session: feed chunks, emit committed-text deltas.
 /// Committed text is a stable prefix (it only grows), so emitting the suffix
 /// since the last emit can never require correcting already-typed text.
-fn run_stream(
-    asr: &mut Asr,
-    jobs: &mpsc::Receiver<Job>,
-    events: &Sender<Event>,
-) -> Result<()> {
+fn run_stream(asr: &mut Asr, jobs: &mpsc::Receiver<Job>, events: &Sender<Event>) -> Result<()> {
     let options = asr.stream_options();
     let mut stream = asr
         .session

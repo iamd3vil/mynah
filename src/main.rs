@@ -1,6 +1,7 @@
 mod asr;
 mod audio;
 mod icon;
+mod models;
 mod overlay;
 mod sock;
 mod sound;
@@ -59,10 +60,14 @@ fn main() -> Result<()> {
             let path = args.next().context("usage: mynah stream-file <wav>")?;
             asr::stream_file(std::path::Path::new(&path))
         }
+        // Fetch models: the named ones, or an interactive pick.
+        Some("download") => models::download(&args.collect::<Vec<_>>()),
         // Print the configured model's capabilities (diagnostics).
         Some("caps") => asr::print_caps(),
         Some(other) => {
-            eprintln!("usage: mynah [daemon|toggle|cancel|status|quit|transcribe <wav>...|stream-file <wav>|caps]");
+            eprintln!(
+                "usage: mynah [daemon|toggle|cancel|status|quit|download [model...]|transcribe <wav>...|stream-file <wav>|caps]"
+            );
             anyhow::bail!("unknown command: {other}");
         }
     }
