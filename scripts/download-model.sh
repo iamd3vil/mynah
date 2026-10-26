@@ -1,17 +1,17 @@
 #!/bin/sh
-# Download models for mynah. Usage: download-model.sh [parakeet|whisper|all]
+# Download models for mynah. Usage: download-model.sh [parakeet|cohere|whisper|streaming|all]
 set -eu
 
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/mynah/models"
 WHICH="${1:-parakeet}"
 
-parakeet() {
-    OUT="$DATA/parakeet-tdt-0.6b-v3-Q8_0.gguf"
+# fetch <hf repo> <file>: download a handy-computer gguf into $DATA.
+fetch() {
     mkdir -p "$DATA"
-    echo "==> parakeet-tdt-0.6b-v3-Q8_0.gguf"
-    curl -fL --retry 3 -C - -o "$OUT" \
-        "https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf/resolve/main/parakeet-tdt-0.6b-v3-Q8_0.gguf"
-    echo "Parakeet ready at $OUT"
+    echo "==> $2"
+    curl -fL --retry 3 -C - -o "$DATA/$2" \
+        "https://huggingface.co/handy-computer/$1/resolve/main/$2"
+    echo "Ready at $DATA/$2"
 }
 
 whisper() {
@@ -23,19 +23,15 @@ whisper() {
     echo "Whisper ready at $OUT"
 }
 
-streaming() {
-    OUT="$DATA/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
-    mkdir -p "$DATA"
-    echo "==> nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
-    curl -fL --retry 3 -C - -o "$OUT" \
-        "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"
-    echo "Streaming model ready at $OUT"
-}
+parakeet() { fetch parakeet-ultra-gguf parakeet-ultra-Q8_0.gguf; }
+cohere() { fetch cohere-transcribe-03-2026-gguf cohere-transcribe-03-2026-Q4_K_M.gguf; }
+streaming() { fetch parakeet-unified-en-0.6b-gguf parakeet-unified-en-0.6b-Q8_0.gguf; }
 
 case "$WHICH" in
     parakeet) parakeet ;;
+    cohere) cohere ;;
     whisper) whisper ;;
     streaming) streaming ;;
-    all) parakeet; whisper; streaming ;;
-    *) echo "usage: $0 [parakeet|whisper|streaming|all]" >&2; exit 1 ;;
+    all) parakeet; cohere; whisper; streaming ;;
+    *) echo "usage: $0 [parakeet|cohere|whisper|streaming|all]" >&2; exit 1 ;;
 esac

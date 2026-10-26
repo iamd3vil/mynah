@@ -1,4 +1,4 @@
-//! User-defined post-transcription corrections and Whisper vocabulary hints.
+//! User-defined post-transcription corrections and model vocabulary hints.
 
 use std::path::PathBuf;
 
@@ -67,18 +67,15 @@ impl Vocabulary {
         })
     }
 
-    /// A contextual bias for Whisper. Parakeet currently has no equivalent API.
-    pub fn whisper_prompt(&self) -> Option<String> {
-        if self.rules.is_empty() {
-            return None;
+    /// Desired spellings, for models that accept a vocabulary bias.
+    pub fn terms(&self) -> Vec<String> {
+        let mut terms: Vec<String> = Vec::new();
+        for rule in &self.rules {
+            if !terms.contains(&rule.replacement) {
+                terms.push(rule.replacement.clone());
+            }
         }
-        let terms = self
-            .rules
-            .iter()
-            .map(|rule| rule.replacement.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Some(format!("Technical terms and names: {terms}."))
+        terms
     }
 }
 

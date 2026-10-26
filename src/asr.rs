@@ -4,15 +4,19 @@
 //! Inference runs on transcribe.cpp (unified ggml engine) — one API for every
 //! model family, GPU offload via the `vulkan` feature. MYNAH_ENGINE picks the
 //! default model:
-//! - "parakeet" (default): Parakeet TDT 0.6B v3, fast.
-//! - "whisper": Whisper large-v3-turbo, better on accented English.
-//! MYNAH_MODEL overrides the model path entirely (any supported gguf).
+//! - "parakeet" (default): Parakeet Ultra (post-trained TDT 0.6B v3), fast.
+//! - "cohere": Cohere Transcribe 2B, most accurate (~3x parakeet's latency).
+//! - "whisper": Whisper large-v3-turbo; slower and less accurate than cohere,
+//!   but takes vocabulary.txt terms as a decoding bias.
+//!
+//! Accuracy/speed numbers: scripts/bench.py. MYNAH_MODEL overrides the model
+//! path entirely (any supported gguf).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 
 use anyhow::{Context, Result};
-use transcribe_cpp::{Model, RunExtension, RunOptions, Session, StreamOptions, WhisperRunOptions};
+use transcribe_cpp::{Feature, Model, RunOptions, Session, StreamOptions};
 
 use crate::Event;
 
@@ -35,41 +39,41 @@ fn model_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     if streaming_enabled() {
-        // Streaming needs a streaming-capable model; whisper/parakeet-tdt
-        // are batch-only in transcribe.cpp.
-        return Ok(data_dir().join("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"));
+        // Streaming needs a streaming-capable model; the batch engines
+        // aren't. parakeet-unified beats nemotron-3.5-asr-streaming on WER.
+        return Ok(data_dir().join("parakeet-unified-en-0.6b-Q8_0.gguf"));
     }
     let engine = std::env::var("MYNAH_ENGINE").unwrap_or_else(|_| "parakeet".into());
     match engine.as_str() {
-        "parakeet" => Ok(data_dir().join("parakeet-tdt-0.6b-v3-Q8_0.gguf")),
+        "parakeet" => Ok(data_dir().join("parakeet-ultra-Q8_0.gguf")),
+        "cohere" => Ok(data_dir().join("cohere-transcribe-03-2026-Q4_K_M.gguf")),
         // whisper.cpp .bin files load directly (backward compatible).
         "whisper" => Ok(data_dir().join("ggml-large-v3-turbo-q5_0.bin")),
-        other => anyhow::bail!("unknown MYNAH_ENGINE {other:?} (use parakeet or whisper)"),
+        other => anyhow::bail!("unknown MYNAH_ENGINE {other:?} (use parakeet, cohere or whisper)"),
     }
 }
 
-fn language() -> String {
+/// MYNAH_LANG (default "en") matched to the model's language list: locale
+/// models (nemotron) reject bare "en" and want "en-US", others want "en".
+fn language(supported: &[String]) -> String {
     let lang = std::env::var("MYNAH_LANG").unwrap_or_else(|_| "en".into());
-    // Locale-based models (nemotron) reject bare "en"; default to en-US.
-    if streaming_enabled() && !lang.contains('-') && lang == "en" {
-        return "en-US".into();
+    if supported.is_empty() || supported.contains(&lang) {
+        return lang;
     }
-    lang
-}
-
-/// Run options for streaming: pinned locale. (Nemotron ignores runtime PNC
-/// control — punctuation is whatever the model produces.)
-fn stream_run_options() -> RunOptions {
-    RunOptions {
-        language: Some(language()),
-        ..Default::default()
-    }
+    let prefix = format!("{lang}-");
+    supported
+        .iter()
+        .find(|l| l.starts_with(&prefix))
+        .cloned()
+        .unwrap_or(lang)
 }
 
 struct Asr {
     session: Session,
+    language: String,
     vocabulary: crate::vocabulary::Vocabulary,
-    is_whisper: bool,
+    /// Model accepts vocabulary terms as a decoding bias (whisper, qwen3-asr).
+    vocab_bias: bool,
 }
 
 impl Asr {
@@ -83,39 +87,45 @@ impl Asr {
         );
         let model =
             Model::load(&path).with_context(|| format!("loading model {}", path.display()))?;
+        let caps = model.capabilities()?;
         if streaming_enabled() {
             anyhow::ensure!(
-                model.capabilities().supports_streaming,
+                caps.supports_streaming,
                 "{} ({}) does not support streaming — MYNAH_STREAM needs a \
                  streaming-capable model (e.g. nemotron-3.5-asr-streaming)",
                 path.display(),
                 model.arch()
             );
         }
-        let is_whisper = model.arch().eq_ignore_ascii_case("whisper");
+        let vocab_bias = model.supports(Feature::Vocabulary);
         let session = model.session().context("opening session")?;
         Ok(Self {
             session,
+            language: language(&caps.languages),
             vocabulary: crate::vocabulary::Vocabulary::load()?,
-            is_whisper,
+            vocab_bias,
         })
+    }
+
+    /// Run options for streaming: pinned language. (Streaming models ignore
+    /// runtime PNC control — punctuation is whatever the model produces.)
+    fn stream_options(&self) -> RunOptions {
+        RunOptions {
+            language: Some(self.language.clone()),
+            ..Default::default()
+        }
     }
 
     fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
         let options = RunOptions {
             // Pinned language (default "en") — auto-detect adds latency and
             // can misfire on short dictation clips.
-            language: Some(language()),
-            family: self
-                .is_whisper
-                .then(|| self.vocabulary.whisper_prompt())
-                .flatten()
-                .map(|initial_prompt| {
-                    RunExtension::Whisper(WhisperRunOptions {
-                        initial_prompt: Some(initial_prompt),
-                        ..Default::default()
-                    })
-                }),
+            language: Some(self.language.clone()),
+            vocabulary: if self.vocab_bias {
+                self.vocabulary.terms()
+            } else {
+                Vec::new()
+            },
             ..Default::default()
         };
         let transcript = self
@@ -172,7 +182,7 @@ impl Worker {
                             events.send(Event::Transcribed(result)).ok();
                         }
                         Job::StreamStart => {
-                            if let Err(e) = run_stream(&mut model.session, &job_rx, &events) {
+                            if let Err(e) = run_stream(&mut model, &job_rx, &events) {
                                 log::error!("stream failed: {e:#}");
                                 crate::notify(&format!("Streaming failed: {e}"));
                                 events.send(Event::StreamDone).ok();
@@ -219,12 +229,14 @@ impl Worker {
 /// Committed text is a stable prefix (it only grows), so emitting the suffix
 /// since the last emit can never require correcting already-typed text.
 fn run_stream(
-    session: &mut Session,
+    asr: &mut Asr,
     jobs: &mpsc::Receiver<Job>,
     events: &Sender<Event>,
 ) -> Result<()> {
-    let mut stream = session
-        .stream(&stream_run_options(), &StreamOptions::default())
+    let options = asr.stream_options();
+    let mut stream = asr
+        .session
+        .stream(&options, &StreamOptions::default())
         .map_err(|e| anyhow::anyhow!("opening stream: {e}"))?;
     let started = std::time::Instant::now();
     let mut emitted = 0usize;
@@ -279,24 +291,28 @@ pub fn print_caps() -> Result<()> {
     let path = model_path()?;
     let model = Model::load(&path)?;
     println!("model: {} ({})", path.display(), model.arch());
-    println!("{:#?}", model.capabilities());
+    println!("{:#?}", model.capabilities()?);
     Ok(())
 }
 
-/// One-shot file transcription for `mynah transcribe` (testing/debugging).
-pub fn transcribe_file(path: &std::path::Path) -> Result<String> {
-    let samples = read_wav_16k_mono(path)?;
+/// File transcription for `mynah transcribe` (testing/benchmarking): loads
+/// the model once, prints one transcript line per file.
+pub fn transcribe_files(paths: &[String]) -> Result<()> {
     let t0 = std::time::Instant::now();
     let mut asr = Asr::load()?;
-    let loaded = t0.elapsed();
-    let t1 = std::time::Instant::now();
-    let text = asr.transcribe(&samples)?;
-    eprintln!(
-        "load: {loaded:.1?}, inference: {:.1?} for {:.1}s audio",
-        t1.elapsed(),
-        samples.len() as f32 / 16000.0
-    );
-    Ok(text)
+    eprintln!("load: {:.1?}", t0.elapsed());
+    for path in paths {
+        let samples = read_wav_16k_mono(std::path::Path::new(path))?;
+        let t1 = std::time::Instant::now();
+        let text = asr.transcribe(&samples)?;
+        eprintln!(
+            "inference: {:.3}s for {:.1}s audio",
+            t1.elapsed().as_secs_f32(),
+            samples.len() as f32 / 16000.0
+        );
+        println!("{}", text.replace('\n', " "));
+    }
+    Ok(())
 }
 
 /// Offline streaming test for `mynah stream-file`: feed a wav in 160ms chunks
@@ -304,9 +320,10 @@ pub fn transcribe_file(path: &std::path::Path) -> Result<String> {
 pub fn stream_file(path: &std::path::Path) -> Result<()> {
     let samples = read_wav_16k_mono(path)?;
     let mut asr = Asr::load()?;
+    let options = asr.stream_options();
     let mut stream = asr
         .session
-        .stream(&stream_run_options(), &StreamOptions::default())
+        .stream(&options, &StreamOptions::default())
         .map_err(|e| anyhow::anyhow!("opening stream: {e}"))?;
 
     let mut feed_times = Vec::new();

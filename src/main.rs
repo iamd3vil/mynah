@@ -48,12 +48,11 @@ fn main() -> Result<()> {
     match args.next().as_deref() {
         None | Some("daemon") => daemon(),
         Some(cmd @ ("toggle" | "cancel" | "status" | "quit")) => sock::send(cmd),
-        // Offline test path: transcribe a 16 kHz mono wav and print the text.
+        // Offline test path: transcribe 16 kHz mono wavs, one line per file.
         Some("transcribe") => {
-            let path = args.next().context("usage: mynah transcribe <wav>")?;
-            let text = asr::transcribe_file(std::path::Path::new(&path))?;
-            println!("{text}");
-            Ok(())
+            let paths: Vec<String> = args.collect();
+            anyhow::ensure!(!paths.is_empty(), "usage: mynah transcribe <wav>...");
+            asr::transcribe_files(&paths)
         }
         // Offline streaming test: feed a wav in chunks, print committed deltas.
         Some("stream-file") => {
@@ -63,7 +62,7 @@ fn main() -> Result<()> {
         // Print the configured model's capabilities (diagnostics).
         Some("caps") => asr::print_caps(),
         Some(other) => {
-            eprintln!("usage: mynah [daemon|toggle|cancel|status|quit|transcribe <wav>|caps]");
+            eprintln!("usage: mynah [daemon|toggle|cancel|status|quit|transcribe <wav>...|stream-file <wav>|caps]");
             anyhow::bail!("unknown command: {other}");
         }
     }
